@@ -1,11 +1,11 @@
 {
-    "name": "classcue",
-    "short_name": "classcue",
+    "name": "ClassCue — by KYUJUSAN 93",
+    "short_name": "ClassCue",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#F8FAFC",
+    "theme_color": "#3730A3",
+    "description": "ClassCue — by KYUJUSAN 93. Real-time lecture status, conflict-free rescheduling, coverage opt-in, and majority polls for Goa Business School, Goa University.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
