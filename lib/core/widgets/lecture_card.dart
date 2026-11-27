@@ -8,6 +8,9 @@ import 'status_badge.dart';
 
 /// Structured Lecture Card implementing Visibility of System Status (Nielsen #1):
 /// - High-contrast status chip (`Scheduled`, `Cancelled`, `Rescheduling Pending`, `Rescheduled`, `Covered`)
+/// - Course-aware coverage display: shows covering course + covering faculty prominently with
+///   muted/struck-through original cancelled course line underneath, OR shows `Cancelled` for
+///   Students/CRs whose cohort is not enrolled in `coveringCourseId`.
 /// - Strikethrough original date/time/room beside highlighted updated slot when `originalDate != null`
 /// - `Temporary` vs `Permanent` scope pill and explicit `Room Changed` badge when `originalRoomId != roomId`
 /// - `B1` / `B2` lab batch pills and `Shared · Sem VII & IX` badge on cross-cohort courses
@@ -18,26 +21,52 @@ class LectureCard extends StatelessWidget {
     required this.session,
     required this.service,
     required this.onTap,
+    this.viewerProfile,
     this.showDate = false,
+    this.extraPills = const [],
     this.trailingAction,
   });
 
   final LectureSession session;
   final SupabaseService service;
   final VoidCallback onTap;
+  final UserProfile? viewerProfile;
   final bool showDate;
+  final List<Widget> extraPills;
   final Widget? trailingAction;
 
   @override
   Widget build(BuildContext context) {
-    final course = service.courseById(session.courseId);
+    final originalCourse = service.courseById(session.courseId);
+    final coveringCourse = service.courseById(session.coveringCourseId);
     final room = service.roomById(session.roomId);
     final originalRoom = service.roomById(session.originalRoomId);
     final faculty = service.facultyById(session.facultyId);
     final coveringFaculty = service.facultyById(session.coveringFacultyId);
     final baseEntry = service.baseTimetableById(session.baseTimetableId);
-    final sharedLabel = service.sharedCourseLabel(session.courseId);
-    final style = AppTheme.statusStyleFor(session.status);
+
+    final bool isCancelledForCohort = service.isCoveredByOtherCohortForUser(
+      session,
+      viewerProfile,
+    );
+    final bool isCourseAwareCovered =
+        session.isCovered &&
+        session.coveringCourseId != null &&
+        !isCancelledForCohort;
+
+    final Course? displayCourse = isCourseAwareCovered
+        ? (coveringCourse ?? originalCourse)
+        : originalCourse;
+
+    final String effectiveStatus = isCancelledForCohort
+        ? 'cancelled'
+        : session.status;
+    final bool strikeTitle = session.isCancelled || isCancelledForCohort;
+
+    final String sharedLabel = service.sharedCourseLabel(
+      isCourseAwareCovered ? session.activeCourseId : session.courseId,
+    );
+    final style = AppTheme.statusStyleFor(effectiveStatus);
 
     final bool isLabSession =
         session.batch != 'ALL' || baseEntry?.sessionType == 'practical';
@@ -63,26 +92,28 @@ class LectureCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          course?.code ?? 'Course',
-                          style: const TextStyle(
+                          displayCourse?.code ?? 'Course',
+                          style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w800,
-                            color: AppTheme.primaryIndigo,
+                            color: isCourseAwareCovered
+                                ? AppTheme.coveredStyle.foreground
+                                : AppTheme.primaryIndigo,
                             letterSpacing: 0.3,
                           ),
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          course?.name ?? 'Scheduled Lecture',
+                          displayCourse?.name ?? 'Scheduled Lecture',
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w700,
-                            color: session.isCancelled
+                            color: strikeTitle
                                 ? AppTheme.inkMuted
                                 : AppTheme.inkPrimary,
-                            decoration: session.isCancelled
+                            decoration: strikeTitle
                                 ? TextDecoration.lineThrough
                                 : null,
                           ),
@@ -91,9 +122,58 @@ class LectureCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  StatusBadge.lecture(session.status),
+                  StatusBadge.lecture(effectiveStatus),
                 ],
               ),
+
+              // Course-aware coverage sub-lines
+              if (isCancelledForCohort) ...[
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline_rounded,
+                      size: 14,
+                      color: AppTheme.cancelledStyle.foreground,
+                    ),
+                    const SizedBox(width: 5),
+                    const Expanded(
+                      child: Text(
+                        'Cancelled for your cohort · Slot taken by another cohort',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: AppTheme.inkMuted,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ] else if (isCourseAwareCovered && originalCourse != null) ...[
+                const SizedBox(height: 5),
+                Text.rich(
+                  TextSpan(
+                    text: 'Taking cancelled ',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.inkMuted,
+                    ),
+                    children: [
+                      TextSpan(
+                        text: '${originalCourse.code} · ${originalCourse.name}',
+                        style: const TextStyle(
+                          decoration: TextDecoration.lineThrough,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const TextSpan(text: ' slot'),
+                    ],
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+
               const SizedBox(height: 10),
 
               // Time + Room row (with Original vs Updated strikethrough comparison)
@@ -167,26 +247,35 @@ class LectureCard extends StatelessWidget {
               // Faculty row
               Row(
                 children: [
-                  const Icon(
-                    Icons.person_outline_rounded,
+                  Icon(
+                    isCourseAwareCovered
+                        ? Icons.person_add_alt_1_rounded
+                        : Icons.person_outline_rounded,
                     size: 15,
-                    color: AppTheme.inkMuted,
+                    color: isCourseAwareCovered
+                        ? AppTheme.coveredStyle.foreground
+                        : AppTheme.inkMuted,
                   ),
                   const SizedBox(width: 5),
                   Expanded(
                     child: Text(
-                      coveringFaculty != null
+                      isCancelledForCohort
+                          ? faculty?.displayLabel ?? 'Assigned Faculty'
+                          : isCourseAwareCovered && coveringFaculty != null
+                          ? coveringFaculty.displayLabel
+                          : coveringFaculty != null
                           ? 'Covered by ${coveringFaculty.fullName} (for ${faculty?.fullName ?? 'Faculty'})'
                           : faculty?.displayLabel ?? 'Assigned Faculty',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 12.5,
-                        color: coveringFaculty != null
+                        color: isCourseAwareCovered && coveringFaculty != null
                             ? AppTheme.coveredStyle.foreground
                             : AppTheme.inkMuted,
-                        fontWeight: coveringFaculty != null
-                            ? FontWeight.w600
+                        fontWeight:
+                            isCourseAwareCovered && coveringFaculty != null
+                            ? FontWeight.w700
                             : FontWeight.w500,
                       ),
                     ),
@@ -254,20 +343,33 @@ class LectureCard extends StatelessWidget {
                       background: Color(0xFFEDE9FE),
                       border: Color(0xFFC4B5FD),
                     ),
+                  ...extraPills,
                 ],
               ),
 
               if (session.reason != null &&
                   session.reason!.trim().isNotEmpty) ...[
                 const SizedBox(height: 8),
-                Text(
-                  'Note: ${session.reason!.trim()}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: AppTheme.secondarySlate,
-                    fontStyle: FontStyle.italic,
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppTheme.surfaceTint,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppTheme.cardBorder),
+                  ),
+                  child: Text(
+                    session.reason!.trim(),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.secondarySlate,
+                      height: 1.35,
+                    ),
                   ),
                 ),
               ],

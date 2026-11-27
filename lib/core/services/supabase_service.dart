@@ -74,6 +74,54 @@ class SupabaseService {
     return assignments.any((cf) => cf.facultyId == facultyId);
   }
 
+  /// Returns true if [cohortId] is enrolled in [courseId] according to cached `course_cohorts`.
+  bool isCohortEnrolledInCourse(String cohortId, String courseId) {
+    final cohortIds = _courseCohortIds[courseId] ?? const [];
+    return cohortIds.contains(cohortId);
+  }
+
+  /// Returns all courses assigned to [facultyId] that share at least one cohort
+  /// with [session.courseId], sorted by course code.
+  List<Course> eligibleCoveringCoursesForSession(
+    LectureSession session,
+    String facultyId,
+  ) {
+    final sessionCohortIds = (_courseCohortIds[session.courseId] ?? const [])
+        .toSet();
+    if (sessionCohortIds.isEmpty) return const [];
+
+    final eligible = <Course>[];
+    for (final entry in _courseFaculty.entries) {
+      final candidateCourseId = entry.key;
+      final isAssigned = entry.value.any((cf) => cf.facultyId == facultyId);
+      if (!isAssigned) continue;
+
+      final candidateCohorts = _courseCohortIds[candidateCourseId] ?? const [];
+      if (candidateCohorts.any(sessionCohortIds.contains)) {
+        final course = _courses[candidateCourseId];
+        if (course != null) {
+          eligible.add(course);
+        }
+      }
+    }
+    eligible.sort((a, b) => a.code.compareTo(b.code));
+    return eligible;
+  }
+
+  /// Returns true when a covered session is being conducted for a course that does NOT
+  /// include the logged-in Student/CR's cohort (so for them, the slot is cancelled).
+  bool isCoveredByOtherCohortForUser(
+    LectureSession session,
+    UserProfile? profile,
+  ) {
+    if (!session.isCovered || session.coveringCourseId == null) return false;
+    if (profile == null) return false;
+    if (!(profile.isStudent || profile.isCr)) return false;
+    final cohortId = profile.cohortId;
+    if (cohortId == null) return false;
+    return !isCohortEnrolledInCourse(cohortId, session.coveringCourseId!);
+  }
+
   /// Resolves `change_history.changed_by` safely without querying other users' profiles.
   String resolveActorName(String changedBy, {String? currentUid}) {
     final uid = currentUid ?? currentUserId;
@@ -240,7 +288,7 @@ class SupabaseService {
     final rows = await _client
         .from('lecture_sessions')
         .select(
-          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, room_id, '
+          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, room_id, '
           'session_date, start_time, end_time, batch, original_date, original_start_time, '
           'original_end_time, original_room_id, status, change_scope, reason, '
           'is_open_for_coverage, version, updated_by, updated_at',
@@ -262,7 +310,7 @@ class SupabaseService {
     final row = await _client
         .from('lecture_sessions')
         .select(
-          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, room_id, '
+          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, room_id, '
           'session_date, start_time, end_time, batch, original_date, original_start_time, '
           'original_end_time, original_room_id, status, change_scope, reason, '
           'is_open_for_coverage, version, updated_by, updated_at',
@@ -278,7 +326,7 @@ class SupabaseService {
     final rows = await _client
         .from('lecture_sessions')
         .select(
-          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, room_id, '
+          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, room_id, '
           'session_date, start_time, end_time, batch, original_date, original_start_time, '
           'original_end_time, original_room_id, status, change_scope, reason, '
           'is_open_for_coverage, version, updated_by, updated_at',
@@ -364,13 +412,32 @@ class SupabaseService {
     return Map<String, dynamic>.from(data as Map);
   }
 
-  /// 3. `opt_in_coverage` (Faculty only).
-  Future<Map<String, dynamic>> optInCoverage(String sessionId) async {
+  /// 3. `opt_in_coverage` (Faculty only, course-aware).
+  Future<Map<String, dynamic>> optInCoverage(
+    String sessionId,
+    String coveringCourseId,
+  ) async {
     final data = await _client.rpc(
       'opt_in_coverage',
-      params: {'p_session_id': sessionId},
+      params: {
+        'p_session_id': sessionId,
+        'p_covering_course_id': coveringCourseId,
+      },
     );
     return Map<String, dynamic>.from(data as Map);
+  }
+
+  /// 3b. `withdraw_coverage` (Covering Faculty / Admin): gives the slot back and re-opens it.
+  Future<void> withdrawCoverage(String sessionId, {String? reason}) async {
+    await _client.rpc(
+      'withdraw_coverage',
+      params: {
+        'p_session_id': sessionId,
+        'p_reason': (reason == null || reason.trim().isEmpty)
+            ? null
+            : reason.trim(),
+      },
+    );
   }
 
   /// 4. `undo_last_lecture_change` (Faculty, Admin only).

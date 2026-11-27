@@ -9,8 +9,9 @@ import '../auth/auth_provider.dart';
 import '../reschedule/reschedule_sheet.dart';
 import 'timetable_provider.dart';
 
-/// Detailed Lecture Bottom Sheet with full metadata, faculty/covering faculty names,
-/// Change History timeline, contextual role actions, and Undo Last Change support.
+/// Detailed Lecture Bottom Sheet with full metadata, course-aware coverage display,
+/// faculty/covering faculty names, Change History timeline, owner update/undo actions,
+/// and dedicated "Give Slot Back" (`withdraw_coverage`) action for covering faculty.
 class LectureDetailSheet extends StatefulWidget {
   const LectureDetailSheet({
     super.key,
@@ -77,18 +78,23 @@ class _LectureDetailSheetState extends State<LectureDetailSheet> {
     }
   }
 
-  bool _canEditSession(UserProfile profile) {
+  bool _isCoveringFaculty(UserProfile profile) {
+    return _session.isCovered &&
+        profile.isFaculty &&
+        _session.coveringFacultyId == profile.id &&
+        _session.facultyId != profile.id;
+  }
+
+  bool _canEditAsOwnerOrAdmin(UserProfile profile) {
     if (profile.isAdmin) return true;
-    if (profile.isFaculty &&
-        (_session.facultyId == profile.id ||
-            _session.coveringFacultyId == profile.id)) {
+    if (profile.isFaculty && _session.facultyId == profile.id) {
       return true;
     }
     return false;
   }
 
   bool _canUndoLatest(UserProfile profile) {
-    if (!_canEditSession(profile) || _history.isEmpty) return false;
+    if (!_canEditAsOwnerOrAdmin(profile) || _history.isEmpty) return false;
     final latest = _history.first;
     if (latest.isUndo || latest.isUndone) return false;
     if (profile.isAdmin) return true;
@@ -133,6 +139,116 @@ class _LectureDetailSheetState extends State<LectureDetailSheet> {
     }
   }
 
+  Future<void> _handleWithdrawCoverage() async {
+    final service = context.read<AuthProvider>().service;
+    final activeCourse = service.courseById(_session.activeCourseId);
+    final origCourse = service.courseById(_session.courseId);
+    String reasonText = '';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+          contentPadding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: AppTheme.cancelledStyle.background,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.assignment_return_outlined,
+                  size: 20,
+                  color: AppTheme.cancelledStyle.foreground,
+                ),
+              ),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'Give Slot Back?',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'This will withdraw your ${activeCourse?.code ?? 'replacement'} lecture and re-open the cancelled ${origCourse?.code ?? ''} slot for other eligible faculty. Affected students and the primary instructor will be notified.',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: AppTheme.inkMuted,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Reason (optional)',
+                    hintText: 'e.g., Unexpected schedule conflict',
+                  ),
+                  onChanged: (val) => reasonText = val,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            OutlinedButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(false),
+              child: const Text('Keep Slot'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: AppTheme.cancelledStyle.foreground,
+              ),
+              onPressed: () => Navigator.of(dialogCtx).pop(true),
+              child: const Text('Give Slot Back'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    setState(() => _busyAction = true);
+    try {
+      await context.read<TimetableProvider>().withdrawCoverage(
+        _session.id,
+        reason: reasonText,
+      );
+      if (!mounted) return;
+      navigator.pop();
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Coverage withdrawn. Slot is open again for other eligible faculty.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busyAction = false);
+      messenger.showSnackBar(
+        SnackBar(content: Text(DateTimeUtils.prettifyError(e))),
+      );
+    }
+  }
+
   Future<void> _openRescheduleSheet() async {
     final messenger = ScaffoldMessenger.of(context);
     final timetable = context.read<TimetableProvider>();
@@ -172,20 +288,40 @@ class _LectureDetailSheetState extends State<LectureDetailSheet> {
     final auth = context.watch<AuthProvider>();
     final profile = auth.profile!;
     final service = auth.service;
-    final course = service.courseById(_session.courseId);
+    final originalCourse = service.courseById(_session.courseId);
+    final coveringCourse = service.courseById(_session.coveringCourseId);
     final room = service.roomById(_session.roomId);
     final originalRoom = service.roomById(_session.originalRoomId);
     final faculty = service.facultyById(_session.facultyId);
     final coveringFaculty = service.facultyById(_session.coveringFacultyId);
-    final cohorts = service.cohortsForCourse(_session.courseId);
-    final canEdit = _canEditSession(profile);
-    final canUndo = _canUndoLatest(profile);
-    final canManagePoll =
-        profile.isAdmin ||
-        profile.isCr ||
-        (profile.isFaculty &&
-            (_session.facultyId == profile.id ||
-                _session.coveringFacultyId == profile.id));
+
+    final bool isCancelledForCohort = service.isCoveredByOtherCohortForUser(
+      _session,
+      profile,
+    );
+    final bool isCourseAwareCovered =
+        _session.isCovered &&
+        _session.coveringCourseId != null &&
+        !isCancelledForCohort;
+
+    final Course? displayCourse = isCourseAwareCovered
+        ? (coveringCourse ?? originalCourse)
+        : originalCourse;
+    final String effectiveStatus = isCancelledForCohort
+        ? 'cancelled'
+        : _session.status;
+    final cohorts = service.cohortsForCourse(
+      isCourseAwareCovered ? _session.activeCourseId : _session.courseId,
+    );
+
+    final bool isCoveringFaculty = _isCoveringFaculty(profile);
+    final bool canEdit = _canEditAsOwnerOrAdmin(profile);
+    final bool canUndo = _canUndoLatest(profile);
+    final bool canManagePoll =
+        !isCoveringFaculty &&
+        (profile.isAdmin ||
+            profile.isCr ||
+            (profile.isFaculty && _session.facultyId == profile.id));
 
     return DraggableScrollableSheet(
       initialChildSize: 0.72,
@@ -218,29 +354,91 @@ class _LectureDetailSheetState extends State<LectureDetailSheet> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        course?.code ?? 'Course',
-                        style: const TextStyle(
+                        displayCourse?.code ?? 'Course',
+                        style: TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w800,
-                          color: AppTheme.primaryIndigo,
+                          color: isCourseAwareCovered
+                              ? AppTheme.coveredStyle.foreground
+                              : AppTheme.primaryIndigo,
                         ),
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        course?.name ?? 'Lecture Session',
-                        style: const TextStyle(
+                        displayCourse?.name ?? 'Lecture Session',
+                        style: TextStyle(
                           fontSize: 19,
                           fontWeight: FontWeight.w800,
-                          color: AppTheme.inkPrimary,
+                          color: isCancelledForCohort || _session.isCancelled
+                              ? AppTheme.inkMuted
+                              : AppTheme.inkPrimary,
+                          decoration:
+                              isCancelledForCohort || _session.isCancelled
+                              ? TextDecoration.lineThrough
+                              : null,
                         ),
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(width: 8),
-                StatusBadge.lecture(_session.status),
+                StatusBadge.lecture(effectiveStatus),
               ],
             ),
+
+            if (isCancelledForCohort) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(11),
+                decoration: BoxDecoration(
+                  color: AppTheme.cancelledStyle.background,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppTheme.cancelledStyle.border),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline_rounded,
+                      size: 17,
+                      color: AppTheme.cancelledStyle.foreground,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Cancelled for your cohort · Slot taken by another cohort',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: AppTheme.cancelledStyle.foreground,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ] else if (isCourseAwareCovered && originalCourse != null) ...[
+              const SizedBox(height: 6),
+              Text.rich(
+                TextSpan(
+                  text: 'Taking cancelled ',
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    color: AppTheme.inkMuted,
+                  ),
+                  children: [
+                    TextSpan(
+                      text: '${originalCourse.code} · ${originalCourse.name}',
+                      style: const TextStyle(
+                        decoration: TextDecoration.lineThrough,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const TextSpan(text: ' slot'),
+                  ],
+                ),
+              ),
+            ],
+
             const SizedBox(height: 14),
 
             // Slot details card
@@ -280,19 +478,35 @@ class _LectureDetailSheetState extends State<LectureDetailSheet> {
                         ? originalRoom?.displayLabel
                         : null,
                   ),
-                  const Divider(height: 18),
-                  _DetailLine(
-                    icon: Icons.person_outline_rounded,
-                    label: 'Primary Faculty',
-                    value: faculty?.displayLabel ?? 'Assigned Faculty',
-                  ),
-                  if (coveringFaculty != null) ...[
+                  if (isCourseAwareCovered && coveringFaculty != null) ...[
                     const Divider(height: 18),
                     _DetailLine(
                       icon: Icons.person_add_alt_1_rounded,
-                      label: 'Covering Faculty',
+                      label: 'Covering Instructor',
                       value: coveringFaculty.displayLabel,
                     ),
+                    const Divider(height: 18),
+                    _DetailLine(
+                      icon: Icons.person_outline_rounded,
+                      label: 'Original Instructor (Cancelled)',
+                      value:
+                          '${faculty?.displayLabel ?? 'Faculty'}${originalCourse != null ? ' · ${originalCourse.code}' : ''}',
+                    ),
+                  ] else ...[
+                    const Divider(height: 18),
+                    _DetailLine(
+                      icon: Icons.person_outline_rounded,
+                      label: 'Primary Faculty',
+                      value: faculty?.displayLabel ?? 'Assigned Faculty',
+                    ),
+                    if (!isCancelledForCohort && coveringFaculty != null) ...[
+                      const Divider(height: 18),
+                      _DetailLine(
+                        icon: Icons.person_add_alt_1_rounded,
+                        label: 'Covering Faculty',
+                        value: coveringFaculty.displayLabel,
+                      ),
+                    ],
                   ],
                   const Divider(height: 18),
                   _DetailLine(
@@ -314,8 +528,29 @@ class _LectureDetailSheetState extends State<LectureDetailSheet> {
               ),
             ),
 
-            // Action Buttons (Role-aware)
-            if (canEdit || canManagePoll) ...[
+            // Covering Faculty dedicated action (Give Slot Back)
+            if (isCoveringFaculty) ...[
+              const SizedBox(height: 14),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppTheme.cancelledStyle.foreground,
+                ),
+                onPressed: _busyAction ? null : _handleWithdrawCoverage,
+                icon: _busyAction
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.assignment_return_outlined, size: 18),
+                label: const Text('Give Slot Back'),
+              ),
+            ]
+            // Owner / Admin / CR Action Buttons
+            else if (canEdit || canManagePoll) ...[
               const SizedBox(height: 14),
               Wrap(
                 spacing: 8,

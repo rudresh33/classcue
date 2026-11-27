@@ -8,6 +8,7 @@ class LectureSession {
     required this.courseId,
     required this.facultyId,
     this.coveringFacultyId,
+    this.coveringCourseId,
     required this.roomId,
     required this.sessionDate,
     required this.startTime,
@@ -31,6 +32,7 @@ class LectureSession {
   final String courseId;
   final String facultyId;
   final String? coveringFacultyId;
+  final String? coveringCourseId;
   final String roomId;
 
   final DateTime sessionDate;
@@ -75,6 +77,7 @@ class LectureSession {
       isCancelled || isPending || isRescheduled || isCovered || isRoomChanged;
 
   String get effectiveFacultyId => coveringFacultyId ?? facultyId;
+  String get activeCourseId => coveringCourseId ?? courseId;
 
   DateTime get startUtc =>
       DateTimeUtils.campusSlotToUtc(sessionDate, startTime);
@@ -87,6 +90,7 @@ class LectureSession {
       courseId: json['course_id'] as String,
       facultyId: json['faculty_id'] as String,
       coveringFacultyId: json['covering_faculty_id'] as String?,
+      coveringCourseId: json['covering_course_id'] as String?,
       roomId: json['room_id'] as String,
       sessionDate: DateTimeUtils.parseSqlDate(json['session_date'] as String),
       startTime: json['start_time'] as String,

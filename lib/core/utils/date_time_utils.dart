@@ -92,6 +92,19 @@ class DateTimeUtils {
     return '${formatSqlTime(startSql)} – ${formatSqlTime(endSql)}';
   }
 
+  /// Formats slot duration between `startSql` and `endSql` like `2h`, `4h`, `1h 30m`, or `45m`.
+  static String formatDurationLabel(String startSql, String endSql) {
+    final start = parseSqlTime(startSql);
+    final end = parseSqlTime(endSql);
+    final totalMinutes = timeOfDayToMinutes(end) - timeOfDayToMinutes(start);
+    if (totalMinutes <= 0) return '';
+    final hours = totalMinutes ~/ 60;
+    final mins = totalMinutes % 60;
+    if (hours > 0 && mins > 0) return '${hours}h ${mins}m';
+    if (hours > 0) return '${hours}h';
+    return '${mins}m';
+  }
+
   /// Formats a campus date like `Mon, 23 Nov`.
   static String formatCampusDate(DateTime date) {
     return DateFormat('EEE, d MMM').format(date);

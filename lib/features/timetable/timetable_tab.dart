@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/models/models.dart';
+import '../../core/services/supabase_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/date_time_utils.dart';
 import '../../core/widgets/widgets.dart';
@@ -13,8 +14,8 @@ import 'lecture_detail_sheet.dart';
 import 'timetable_provider.dart';
 
 /// Main Timetable / My Lectures tab implementing:
-/// - Today's Commute Snapshot card (Student/CR — Nielsen #1)
-/// - Pinned Non-Routine Lecture Reminder banner (Faculty — Nielsen #6)
+/// - Today's Commute Snapshot card (Student/CR — Nielsen #1, course-aware coverage)
+/// - Pinned Non-Routine Lecture Reminder banner (Faculty — Nielsen #6, active covering course)
 /// - Today / Weekly segmented toggle, week switcher, Mon–Sat horizontal day selector
 /// - Lecture Cards opening LectureDetailSheet
 /// - Privacy assurance note for Student role
@@ -39,6 +40,7 @@ class TimetableTab extends StatelessWidget {
             _CommuteSnapshotCard(
               todaySessions: timetable.myTodaySessions,
               service: service,
+              profile: profile,
             )
           else if (profile.isFaculty &&
               timetable.upcoming48hNonRoutine.isNotEmpty)
@@ -153,6 +155,7 @@ class TimetableTab extends StatelessWidget {
                 child: LectureCard(
                   session: session,
                   service: service,
+                  viewerProfile: profile,
                   onTap: () => _openDetail(context, session),
                 ),
               ),
@@ -197,12 +200,16 @@ class TimetableTab extends StatelessWidget {
 
   void _openDetail(BuildContext context, LectureSession session) {
     final profile = context.read<AuthProvider>().profile!;
+    final isCoveringFacultyOnly =
+        session.isCovered &&
+        profile.isFaculty &&
+        session.coveringFacultyId == profile.id &&
+        session.facultyId != profile.id;
     final canPoll =
-        profile.isAdmin ||
-        profile.isCr ||
-        (profile.isFaculty &&
-            (session.facultyId == profile.id ||
-                session.coveringFacultyId == profile.id));
+        !isCoveringFacultyOnly &&
+        (profile.isAdmin ||
+            profile.isCr ||
+            (profile.isFaculty && session.facultyId == profile.id));
 
     LectureDetailSheet.show(
       context,
@@ -232,15 +239,29 @@ class _CommuteSnapshotCard extends StatelessWidget {
   const _CommuteSnapshotCard({
     required this.todaySessions,
     required this.service,
+    required this.profile,
   });
 
   final List<LectureSession> todaySessions;
-  final dynamic service;
+  final SupabaseService service;
+  final UserProfile profile;
+
+  bool _isCancelledForCohort(LectureSession s) =>
+      service.isCoveredByOtherCohortForUser(s, profile);
+
+  bool _isEffectivelyActive(LectureSession s) =>
+      s.isActive && !_isCancelledForCohort(s);
+
+  bool _isEffectivelyCancelled(LectureSession s) =>
+      s.isCancelled || _isCancelledForCohort(s);
 
   @override
   Widget build(BuildContext context) {
-    final activeCount = todaySessions.where((s) => s.isActive).length;
-    final cancelledCount = todaySessions.where((s) => s.isCancelled).length;
+    final activeCount = todaySessions.where(_isEffectivelyActive).length;
+    final cancelledCount = todaySessions.where(_isEffectivelyCancelled).length;
+    final coveredCount = todaySessions
+        .where((s) => s.isCovered && !_isCancelledForCohort(s))
+        .length;
     final pendingCount = todaySessions.where((s) => s.isPending).length;
     final rescheduledCount = todaySessions.where((s) => s.isRescheduled).length;
     final roomChangedCount = todaySessions.where((s) => s.isRoomChanged).length;
@@ -248,7 +269,7 @@ class _CommuteSnapshotCard extends StatelessWidget {
     final nowUtc = DateTime.now().toUtc();
     LectureSession? nextActive;
     for (final s in todaySessions) {
-      if (s.isActive && s.endUtc.isAfter(nowUtc)) {
+      if (_isEffectivelyActive(s) && s.endUtc.isAfter(nowUtc)) {
         nextActive = s;
         break;
       }
@@ -256,16 +277,27 @@ class _CommuteSnapshotCard extends StatelessWidget {
 
     final hasAlerts =
         cancelledCount > 0 ||
+        coveredCount > 0 ||
         pendingCount > 0 ||
         rescheduledCount > 0 ||
         roomChangedCount > 0;
 
     final alertParts = <String>[
       if (cancelledCount > 0) '$cancelledCount Cancelled',
+      if (coveredCount > 0) '$coveredCount Covered',
       if (pendingCount > 0) '$pendingCount Pending',
       if (rescheduledCount > 0) '$rescheduledCount Rescheduled',
       if (roomChangedCount > 0) '$roomChangedCount Room Changed',
     ];
+
+    final nextCourse = nextActive != null
+        ? service.courseById(nextActive.activeCourseId)
+        : null;
+    final nextCourseLabel = nextCourse != null
+        ? (nextActive!.isCovered
+              ? '${nextCourse.code} · ${nextCourse.name}'
+              : nextCourse.code)
+        : 'Lecture';
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -342,7 +374,7 @@ class _CommuteSnapshotCard extends StatelessWidget {
             )
           else if (nextActive != null)
             Text(
-              'Next: ${service.courseById(nextActive.courseId)?.code ?? 'Lecture'} at ${DateTimeUtils.formatSqlTime(nextActive.startTime)} · ${service.roomById(nextActive.roomId)?.roomNumber ?? 'Room'} (${AppTheme.statusStyleFor(nextActive.status).shortLabel})',
+              'Next: $nextCourseLabel at ${DateTimeUtils.formatSqlTime(nextActive.startTime)} · ${service.roomById(nextActive.roomId)?.roomNumber ?? 'Room'} (${AppTheme.statusStyleFor(nextActive.status).shortLabel})',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 14,
@@ -403,7 +435,7 @@ class _NonRoutineReminderBanner extends StatelessWidget {
   });
 
   final List<LectureSession> sessions;
-  final dynamic service;
+  final SupabaseService service;
   final ValueChanged<LectureSession> onTapSession;
 
   @override
@@ -438,8 +470,13 @@ class _NonRoutineReminderBanner extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           ...sessions.take(3).map((s) {
-            final course = service.courseById(s.courseId);
+            final course = service.courseById(s.activeCourseId);
             final room = service.roomById(s.roomId);
+            final courseText = course != null
+                ? (s.isCovered
+                      ? '${course.code} · ${course.name}'
+                      : course.code)
+                : '';
             return InkWell(
               onTap: () => onTapSession(s),
               borderRadius: BorderRadius.circular(8),
@@ -451,7 +488,9 @@ class _NonRoutineReminderBanner extends StatelessWidget {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '${course?.code ?? ''} · ${DateTimeUtils.formatSlotSummary(s.sessionDate, s.startTime, s.endTime)} · ${room?.roomNumber ?? ''}',
+                        '$courseText · ${DateTimeUtils.formatSlotSummary(s.sessionDate, s.startTime, s.endTime)} · ${room?.roomNumber ?? ''}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           fontSize: 12.5,
                           fontWeight: FontWeight.w600,
