@@ -143,6 +143,24 @@ class DateTimeUtils {
   /// Compares two [TimeOfDay] values (minutes from midnight).
   static int timeOfDayToMinutes(TimeOfDay t) => t.hour * 60 + t.minute;
 
+  /// Converts minutes from midnight into a [TimeOfDay] clamped to 00:00–23:59.
+  static TimeOfDay minutesToTimeOfDay(int minutes) {
+    final clamped = minutes.clamp(0, 23 * 60 + 59);
+    return TimeOfDay(hour: clamped ~/ 60, minute: clamped % 60);
+  }
+
+  /// Formats a duration in minutes like `1h`, `1.5h`, `2h`, `4h`, or `45m`.
+  static String formatMinutesShort(int minutes) {
+    if (minutes <= 0) return '';
+    if (minutes % 60 == 0) return '${minutes ~/ 60}h';
+    if (minutes % 30 == 0 && minutes > 60) {
+      return '${(minutes / 60).toStringAsFixed(1)}h';
+    }
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    return h > 0 ? '${h}h ${m}m' : '${m}m';
+  }
+
   /// Checks if two date-only DateTimes fall on the same calendar day.
   static bool isSameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;

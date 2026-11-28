@@ -1,3 +1,4 @@
+export 'available_slot.dart';
 export 'conflict_result.dart';
 export 'history_notification_models.dart';
 export 'lecture_session.dart';

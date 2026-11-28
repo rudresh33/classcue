@@ -288,7 +288,8 @@ class SupabaseService {
     final rows = await _client
         .from('lecture_sessions')
         .select(
-          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, room_id, '
+          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, '
+          'pre_coverage_start_time, pre_coverage_end_time, room_id, '
           'session_date, start_time, end_time, batch, original_date, original_start_time, '
           'original_end_time, original_room_id, status, change_scope, reason, '
           'is_open_for_coverage, version, updated_by, updated_at',
@@ -310,7 +311,8 @@ class SupabaseService {
     final row = await _client
         .from('lecture_sessions')
         .select(
-          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, room_id, '
+          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, '
+          'pre_coverage_start_time, pre_coverage_end_time, room_id, '
           'session_date, start_time, end_time, batch, original_date, original_start_time, '
           'original_end_time, original_room_id, status, change_scope, reason, '
           'is_open_for_coverage, version, updated_by, updated_at',
@@ -326,7 +328,8 @@ class SupabaseService {
     final rows = await _client
         .from('lecture_sessions')
         .select(
-          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, room_id, '
+          'id, base_timetable_id, course_id, faculty_id, covering_faculty_id, covering_course_id, '
+          'pre_coverage_start_time, pre_coverage_end_time, room_id, '
           'session_date, start_time, end_time, batch, original_date, original_start_time, '
           'original_end_time, original_room_id, status, change_scope, reason, '
           'is_open_for_coverage, version, updated_by, updated_at',
@@ -412,16 +415,20 @@ class SupabaseService {
     return Map<String, dynamic>.from(data as Map);
   }
 
-  /// 3. `opt_in_coverage` (Faculty only, course-aware).
+  /// 3. `opt_in_coverage` (Faculty only, course-aware + optional partial duration window).
   Future<Map<String, dynamic>> optInCoverage(
     String sessionId,
-    String coveringCourseId,
-  ) async {
+    String coveringCourseId, {
+    String? startTime,
+    String? endTime,
+  }) async {
     final data = await _client.rpc(
       'opt_in_coverage',
       params: {
         'p_session_id': sessionId,
         'p_covering_course_id': coveringCourseId,
+        'p_start_time': startTime,
+        'p_end_time': endTime,
       },
     );
     return Map<String, dynamic>.from(data as Map);
@@ -503,6 +510,43 @@ class SupabaseService {
   Future<int> expireStalePolls() async {
     final count = await _client.rpc('expire_stale_polls', params: {});
     return (count as num).toInt();
+  }
+
+  /// 9. `get_available_slots` (CR, Faculty, Admin ONLY).
+  Future<List<AvailableSlot>> getAvailableSlots({
+    required String sessionId,
+    DateTime? fromDate,
+    int daysAhead = 7,
+    int? durationMinutes,
+    bool includeSaturday = true,
+    bool skipLunch = true,
+    int limit = 12,
+    int maxPerDay = 3,
+    int minLeadMinutes = 60,
+  }) async {
+    final rows = await _client.rpc(
+      'get_available_slots',
+      params: {
+        'p_session_id': sessionId,
+        'p_from_date': fromDate != null
+            ? DateTimeUtils.toSqlDate(fromDate)
+            : null,
+        'p_days_ahead': daysAhead,
+        'p_duration_minutes': durationMinutes,
+        'p_include_saturday': includeSaturday,
+        'p_skip_lunch': skipLunch,
+        'p_limit': limit,
+        'p_max_per_day': maxPerDay,
+        'p_min_lead_minutes': minLeadMinutes,
+      },
+    );
+
+    return (rows as List<dynamic>)
+        .map(
+          (row) =>
+              AvailableSlot.fromJson(Map<String, dynamic>.from(row as Map)),
+        )
+        .toList();
   }
 
   // ===========================================================================

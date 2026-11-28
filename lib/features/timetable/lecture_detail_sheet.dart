@@ -437,6 +437,23 @@ class _LectureDetailSheetState extends State<LectureDetailSheet> {
                   ],
                 ),
               ),
+              if (_session.isPartiallyCovered) ...[
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    InfoPill(
+                      label:
+                          'Partial Cover · ${DateTimeUtils.formatDurationLabel(_session.startTime, _session.endTime)} of ${DateTimeUtils.formatDurationLabel(_session.preCoverageStartTime!, _session.preCoverageEndTime!)}',
+                      icon: Icons.pie_chart_outline_rounded,
+                      foreground: const Color(0xFF0F766E),
+                      background: const Color(0xFFCCFBF1),
+                      border: const Color(0xFF5EEAD4),
+                    ),
+                  ],
+                ),
+              ],
             ],
 
             const SizedBox(height: 14),
@@ -460,7 +477,14 @@ class _LectureDetailSheetState extends State<LectureDetailSheet> {
                       _session.startTime,
                       _session.endTime,
                     ),
-                    oldValue: _session.hasOriginalSnapshot
+                    oldValue:
+                        _session.isPartiallyCovered && !isCancelledForCohort
+                        ? DateTimeUtils.formatSlotSummary(
+                            _session.sessionDate,
+                            _session.preCoverageStartTime!,
+                            _session.preCoverageEndTime!,
+                          )
+                        : _session.hasOriginalSnapshot
                         ? DateTimeUtils.formatSlotSummary(
                             _session.originalDate!,
                             _session.originalStartTime!,

@@ -17,6 +17,7 @@ enum _FacultyActionMode {
 
 /// Structured Faculty/Admin Update & Reschedule Bottom Sheet (Nielsen #5 & #3):
 /// - Zero accidental toggles: explicit segmented action modes
+/// - Smart Free-Slot Picker via `get_available_slots` surfacing freed slots first
 /// - Live `check_slot_conflicts` banner (Cohort / Faculty / Room) + tappable Free Room Chips
 /// - Temporary vs Permanent toggle (disabled if `baseTimetableId == null` or covering faculty)
 /// - Mandatory Pre-Publish `ConfirmActionDialog` before calling `update_lecture_session`
@@ -55,6 +56,17 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
   String _changeScope = 'temporary';
   final _reasonCtrl = TextEditingController();
 
+  // Smart Free-Slot Finder state
+  List<AvailableSlot> _smartSlots = [];
+  bool _loadingSmartSlots = false;
+  String? _smartSlotsError;
+  late int _smartDurationMinutes;
+  bool _includeSaturday = true;
+  bool _allowLunch = false;
+  int _daysAhead = 7;
+  int _maxPerDay = 3;
+  String? _selectedSmartSlotKey;
+
   SlotConflictResult? _conflictResult;
   bool _checkingConflict = false;
   String? _conflictError;
@@ -65,6 +77,9 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
 
   bool get _canRestore =>
       widget.session.isCancelled || widget.session.isPending;
+
+  int get _originalDurationMinutes =>
+      widget.session.baselineDurationMinutes.clamp(30, 240);
 
   bool get _canMakePermanent {
     if (widget.session.baseTimetableId == null) return false;
@@ -89,10 +104,14 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
         : 'cancelled';
     _openForCoverage = widget.session.isOpenForCoverage;
     _selectedDate = widget.session.sessionDate;
-    _startTime = DateTimeUtils.parseSqlTime(widget.session.startTime);
-    _endTime = DateTimeUtils.parseSqlTime(widget.session.endTime);
+    final baseStart =
+        widget.session.preCoverageStartTime ?? widget.session.startTime;
+    final baseEnd = widget.session.preCoverageEndTime ?? widget.session.endTime;
+    _startTime = DateTimeUtils.parseSqlTime(baseStart);
+    _endTime = DateTimeUtils.parseSqlTime(baseEnd);
     _selectedRoomId = widget.session.roomId;
     _reasonCtrl.text = widget.session.reason ?? '';
+    _smartDurationMinutes = _originalDurationMinutes;
   }
 
   @override
@@ -109,13 +128,74 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
   bool get _slotActuallyChanged {
     final startSql = DateTimeUtils.toSqlTime(_startTime);
     final endSql = DateTimeUtils.toSqlTime(_endTime);
+    final baseStart =
+        widget.session.preCoverageStartTime ?? widget.session.startTime;
+    final baseEnd = widget.session.preCoverageEndTime ?? widget.session.endTime;
     return !DateTimeUtils.isSameDay(
           _selectedDate,
           widget.session.sessionDate,
         ) ||
-        startSql != widget.session.startTime ||
-        endSql != widget.session.endTime ||
+        startSql != baseStart ||
+        endSql != baseEnd ||
         _selectedRoomId != widget.session.roomId;
+  }
+
+  Future<void> _loadSmartSlots() async {
+    if (_mode != _FacultyActionMode.reschedule) return;
+    setState(() {
+      _loadingSmartSlots = true;
+      _smartSlotsError = null;
+    });
+
+    try {
+      final slots = await _service.getAvailableSlots(
+        sessionId: widget.session.id,
+        daysAhead: _daysAhead,
+        durationMinutes: _smartDurationMinutes,
+        includeSaturday: _includeSaturday,
+        skipLunch: !_allowLunch,
+        limit: 12,
+        maxPerDay: _maxPerDay,
+        minLeadMinutes: 60,
+      );
+      if (!mounted) return;
+      setState(() {
+        _smartSlots = slots;
+        _loadingSmartSlots = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _smartSlots = [];
+        _smartSlotsError = DateTimeUtils.prettifyError(e);
+        _loadingSmartSlots = false;
+      });
+    }
+  }
+
+  void _selectDurationChip(int minutes) {
+    final startMins = DateTimeUtils.timeOfDayToMinutes(_startTime);
+    final newEnd = DateTimeUtils.minutesToTimeOfDay(
+      (startMins + minutes).clamp(startMins + 30, 23 * 60 + 45),
+    );
+    setState(() {
+      _smartDurationMinutes = minutes;
+      _endTime = newEnd;
+      _selectedSmartSlotKey = null;
+    });
+    _loadSmartSlots();
+    _runConflictCheck();
+  }
+
+  void _applySmartSlot(AvailableSlot slot) {
+    setState(() {
+      _selectedDate = slot.slotDate;
+      _startTime = DateTimeUtils.parseSqlTime(slot.startTime);
+      _endTime = DateTimeUtils.parseSqlTime(slot.endTime);
+      _selectedRoomId = slot.recommendedRoomId;
+      _selectedSmartSlotKey = slot.slotKey;
+    });
+    _runConflictCheck();
   }
 
   Future<void> _runConflictCheck() async {
@@ -183,7 +263,10 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
       lastDate: today.add(const Duration(days: 120)),
     );
     if (picked != null) {
-      setState(() => _selectedDate = picked);
+      setState(() {
+        _selectedDate = picked;
+        _selectedSmartSlotKey = null;
+      });
       await _runConflictCheck();
     }
   }
@@ -200,6 +283,7 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
         } else {
           _endTime = picked;
         }
+        _selectedSmartSlotKey = null;
       });
       await _runConflictCheck();
     }
@@ -374,6 +458,266 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
+  Widget _buildSmartFreeSlotsSection() {
+    final standardDurations = <int>[60, 90, 120];
+    final showOriginalChip = !standardDurations.contains(
+      _originalDurationMinutes,
+    );
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceTint,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.cardBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.auto_awesome_rounded,
+                size: 16,
+                color: AppTheme.primaryIndigo,
+              ),
+              const SizedBox(width: 6),
+              const Expanded(
+                child: Text(
+                  'Smart Free Slots',
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.inkPrimary,
+                  ),
+                ),
+              ),
+              if (!_loadingSmartSlots)
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Refresh smart slots',
+                  onPressed: _loadSmartSlots,
+                  icon: const Icon(
+                    Icons.refresh_rounded,
+                    size: 17,
+                    color: AppTheme.primaryIndigo,
+                  ),
+                ),
+            ],
+          ),
+          const Text(
+            'Conflict-free slots for cohort, instructor & room — freed cancellation windows shown first.',
+            style: TextStyle(fontSize: 11.5, color: AppTheme.inkMuted),
+          ),
+          const SizedBox(height: 10),
+
+          // Duration chips
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final mins in standardDurations)
+                ChoiceChip(
+                  label: Text(
+                    DateTimeUtils.formatMinutesShort(mins),
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  selected: _smartDurationMinutes == mins,
+                  onSelected: (_) => _selectDurationChip(mins),
+                ),
+              if (showOriginalChip)
+                ChoiceChip(
+                  label: Text(
+                    'Original (${DateTimeUtils.formatMinutesShort(_originalDurationMinutes)})',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  selected: _smartDurationMinutes == _originalDurationMinutes,
+                  onSelected: (_) =>
+                      _selectDurationChip(_originalDurationMinutes),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+
+          // Filter chips
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              FilterChip(
+                label: const Text(
+                  'Include Sat',
+                  style: TextStyle(fontSize: 11.5),
+                ),
+                selected: _includeSaturday,
+                onSelected: (v) {
+                  setState(() => _includeSaturday = v);
+                  _loadSmartSlots();
+                },
+              ),
+              FilterChip(
+                label: const Text(
+                  'Allow Lunch',
+                  style: TextStyle(fontSize: 11.5),
+                ),
+                selected: _allowLunch,
+                onSelected: (v) {
+                  setState(() => _allowLunch = v);
+                  _loadSmartSlots();
+                },
+              ),
+              ActionChip(
+                avatar: Icon(
+                  _daysAhead >= 14
+                      ? Icons.check_rounded
+                      : Icons.date_range_rounded,
+                  size: 15,
+                  color: AppTheme.primaryIndigo,
+                ),
+                label: Text(
+                  _daysAhead >= 14 ? 'Showing 14 days' : 'Show more · 14 days',
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                onPressed: () {
+                  setState(() {
+                    if (_daysAhead < 14) {
+                      _daysAhead = 14;
+                      _maxPerDay = 5;
+                    } else {
+                      _daysAhead = 7;
+                      _maxPerDay = 3;
+                    }
+                  });
+                  _loadSmartSlots();
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+
+          if (_loadingSmartSlots)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 10),
+                  Text(
+                    'Finding conflict-free slots...',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      color: AppTheme.secondarySlate,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else if (_smartSlotsError != null)
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppTheme.cancelledStyle.background,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppTheme.cancelledStyle.border),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _smartSlotsError!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppTheme.cancelledStyle.foreground,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _loadSmartSlots,
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
+            )
+          else if (_smartSlots.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppTheme.cardBorder),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'No conflict-free ${DateTimeUtils.formatMinutesShort(_smartDurationMinutes)} slots found in the next $_daysAhead days.',
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: AppTheme.inkPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: [
+                      if (_daysAhead < 14)
+                        FilledButton.tonalIcon(
+                          onPressed: () {
+                            setState(() {
+                              _daysAhead = 14;
+                              _maxPerDay = 5;
+                            });
+                            _loadSmartSlots();
+                          },
+                          icon: const Icon(Icons.date_range_rounded, size: 16),
+                          label: const Text('Search next 14 days'),
+                        ),
+                      if (!_includeSaturday)
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            setState(() => _includeSaturday = true);
+                            _loadSmartSlots();
+                          },
+                          icon: const Icon(Icons.weekend_outlined, size: 16),
+                          label: const Text('Include Saturday'),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            )
+          else
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 240),
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _smartSlots.length,
+                itemBuilder: (_, idx) {
+                  final slot = _smartSlots[idx];
+                  return SmartSlotCard(
+                    slot: slot,
+                    isSelected: _selectedSmartSlotKey == slot.slotKey,
+                    onTap: () => _applySmartSlot(slot),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final course = _service.courseById(widget.session.courseId);
@@ -456,6 +800,9 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
                     _changeScope = 'temporary';
                   }
                 });
+                if (_mode == _FacultyActionMode.reschedule) {
+                  _loadSmartSlots();
+                }
                 if (_needsConflictCheck) {
                   _runConflictCheck();
                 }
@@ -510,8 +857,15 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
               ),
             ],
 
-            // Mode 2: Reschedule Slot
+            // Mode 2: Reschedule Slot (Smart Free Slots + Manual Fine-Tuning)
             if (_mode == _FacultyActionMode.reschedule) ...[
+              _buildSmartFreeSlotsSection(),
+              const SizedBox(height: 14),
+              const Text(
+                'Selected / Manual Slot',
+                style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
               Row(
                 children: [
                   Expanded(
@@ -556,6 +910,7 @@ class _RescheduleSheetState extends State<RescheduleSheet> {
             if (_mode == _FacultyActionMode.reschedule ||
                 _mode == _FacultyActionMode.roomChange) ...[
               DropdownButtonFormField<String>(
+                key: ValueKey('room_$_selectedRoomId'),
                 initialValue: _selectedRoomId,
                 decoration: const InputDecoration(
                   labelText: 'Classroom / Lab',

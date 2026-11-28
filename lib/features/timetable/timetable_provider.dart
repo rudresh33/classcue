@@ -225,8 +225,18 @@ class TimetableProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> optInCoverage(String sessionId, String coveringCourseId) async {
-    await _service.optInCoverage(sessionId, coveringCourseId);
+  Future<void> optInCoverage(
+    String sessionId,
+    String coveringCourseId, {
+    String? startTime,
+    String? endTime,
+  }) async {
+    await _service.optInCoverage(
+      sessionId,
+      coveringCourseId,
+      startTime: startTime,
+      endTime: endTime,
+    );
     await refreshAll(silent: true);
   }
 

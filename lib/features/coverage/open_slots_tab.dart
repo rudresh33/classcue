@@ -8,10 +8,39 @@ import '../../core/widgets/widgets.dart';
 import '../auth/auth_provider.dart';
 import '../timetable/timetable_provider.dart';
 
+class _CoverageWindowOption {
+  const _CoverageWindowOption({
+    required this.key,
+    required this.label,
+    required this.start,
+    required this.end,
+    required this.isFull,
+  });
+
+  final String key;
+  final String label;
+  final TimeOfDay start;
+  final TimeOfDay end;
+  final bool isFull;
+}
+
+class _CoverageSelectionResult {
+  const _CoverageSelectionResult({
+    required this.courseId,
+    this.startTime,
+    this.endTime,
+  });
+
+  final String courseId;
+  final String? startTime; // null when full slot
+  final String? endTime; // null when full slot
+}
+
 /// Faculty Open Slots Tab: displays cohort-eligible sessions where
 /// `is_open_for_coverage == true && faculty_id != auth.uid()`, showing eligible
-/// courses and slot duration, and letting faculty pick which of their assigned
-/// courses to conduct via `opt_in_coverage(p_session_id, p_covering_course_id)`.
+/// courses and slot duration, and letting faculty pick both which of their assigned
+/// courses to conduct AND whether to take the full slot or a partial window via
+/// `opt_in_coverage(p_session_id, p_covering_course_id, p_start_time, p_end_time)`.
 class OpenSlotsTab extends StatefulWidget {
   const OpenSlotsTab({super.key});
 
@@ -21,6 +50,96 @@ class OpenSlotsTab extends StatefulWidget {
 
 class _OpenSlotsTabState extends State<OpenSlotsTab> {
   String? _busySessionId;
+
+  List<_CoverageWindowOption> _buildWindowPresets(LectureSession session) {
+    final slotStart = DateTimeUtils.parseSqlTime(session.startTime);
+    final slotEnd = DateTimeUtils.parseSqlTime(session.endTime);
+    final startMin = DateTimeUtils.timeOfDayToMinutes(slotStart);
+    final endMin = DateTimeUtils.timeOfDayToMinutes(slotEnd);
+    final totalMins = endMin - startMin;
+
+    final presets = <_CoverageWindowOption>[
+      _CoverageWindowOption(
+        key: 'full',
+        label:
+            'Full Slot (${DateTimeUtils.formatTimeRange(session.startTime, session.endTime)})',
+        start: slotStart,
+        end: slotEnd,
+        isFull: true,
+      ),
+    ];
+
+    if (totalMins <= 60) return presets;
+
+    // Quick 1-hour chunks
+    final first1hEnd = DateTimeUtils.minutesToTimeOfDay(startMin + 60);
+    presets.add(
+      _CoverageWindowOption(
+        key: 'first_1h',
+        label:
+            'First 1h (${DateTimeUtils.formatTimeOfDay(slotStart)} – ${DateTimeUtils.formatTimeOfDay(first1hEnd)})',
+        start: slotStart,
+        end: first1hEnd,
+        isFull: false,
+      ),
+    );
+
+    if (startMin + 120 <= endMin) {
+      final second1hEnd = DateTimeUtils.minutesToTimeOfDay(startMin + 120);
+      presets.add(
+        _CoverageWindowOption(
+          key: 'second_1h',
+          label:
+              'Second 1h (${DateTimeUtils.formatTimeOfDay(first1hEnd)} – ${DateTimeUtils.formatTimeOfDay(second1hEnd)})',
+          start: first1hEnd,
+          end: second1hEnd,
+          isFull: false,
+        ),
+      );
+    } else if (endMin - 60 > startMin) {
+      final last1hStart = DateTimeUtils.minutesToTimeOfDay(endMin - 60);
+      presets.add(
+        _CoverageWindowOption(
+          key: 'last_1h',
+          label:
+              'Last 1h (${DateTimeUtils.formatTimeOfDay(last1hStart)} – ${DateTimeUtils.formatTimeOfDay(slotEnd)})',
+          start: last1hStart,
+          end: slotEnd,
+          isFull: false,
+        ),
+      );
+    }
+
+    // For 4h (or >= 3.5h) lab slots, also include First 2h and Second 2h presets
+    if (totalMins >= 210) {
+      final first2hEnd = DateTimeUtils.minutesToTimeOfDay(startMin + 120);
+      presets.add(
+        _CoverageWindowOption(
+          key: 'first_2h',
+          label:
+              'First 2h (${DateTimeUtils.formatTimeOfDay(slotStart)} – ${DateTimeUtils.formatTimeOfDay(first2hEnd)})',
+          start: slotStart,
+          end: first2hEnd,
+          isFull: false,
+        ),
+      );
+      if (startMin + 240 <= endMin) {
+        final second2hEnd = DateTimeUtils.minutesToTimeOfDay(startMin + 240);
+        presets.add(
+          _CoverageWindowOption(
+            key: 'second_2h',
+            label:
+                'Second 2h (${DateTimeUtils.formatTimeOfDay(first2hEnd)} – ${DateTimeUtils.formatTimeOfDay(second2hEnd)})',
+            start: first2hEnd,
+            end: second2hEnd,
+            isFull: false,
+          ),
+        );
+      }
+    }
+
+    return presets;
+  }
 
   Future<void> _offerToCover(LectureSession session) async {
     final auth = context.read<AuthProvider>();
@@ -33,16 +152,24 @@ class _OpenSlotsTabState extends State<OpenSlotsTab> {
       session,
       profile.id,
     );
-    final durationLabel = DateTimeUtils.formatDurationLabel(
-      session.startTime,
-      session.endTime,
-    );
+    final slotStart = DateTimeUtils.parseSqlTime(session.startTime);
+    final slotEnd = DateTimeUtils.parseSqlTime(session.endTime);
+    final slotStartMin = DateTimeUtils.timeOfDayToMinutes(slotStart);
+    final slotEndMin = DateTimeUtils.timeOfDayToMinutes(slotEnd);
+    final totalMins = slotEndMin - slotStartMin;
+    final showDurationSelector = totalMins > 60;
+    final presets = _buildWindowPresets(session);
 
     String? selectedCourseId = eligibleCourses.isNotEmpty
         ? eligibleCourses.first.id
         : null;
+    String selectedWindowKey = 'full';
+    TimeOfDay customStart = slotStart;
+    TimeOfDay customEnd = totalMins > 60
+        ? DateTimeUtils.minutesToTimeOfDay(slotStartMin + 60)
+        : slotEnd;
 
-    final chosenCourseId = await showDialog<String>(
+    final result = await showDialog<_CoverageSelectionResult>(
       context: context,
       barrierDismissible: false,
       builder: (dialogCtx) {
@@ -51,6 +178,52 @@ class _OpenSlotsTabState extends State<OpenSlotsTab> {
             final Course? chosenCourse = selectedCourseId != null
                 ? eligibleCourses.firstWhere((c) => c.id == selectedCourseId)
                 : null;
+
+            final bool isCustom = selectedWindowKey == 'custom';
+            final _CoverageWindowOption activePreset = isCustom
+                ? presets.first
+                : presets.firstWhere(
+                    (p) => p.key == selectedWindowKey,
+                    orElse: () => presets.first,
+                  );
+
+            final TimeOfDay effectiveStart = isCustom
+                ? customStart
+                : activePreset.start;
+            final TimeOfDay effectiveEnd = isCustom
+                ? customEnd
+                : activePreset.end;
+            final int effStartMin = DateTimeUtils.timeOfDayToMinutes(
+              effectiveStart,
+            );
+            final int effEndMin = DateTimeUtils.timeOfDayToMinutes(
+              effectiveEnd,
+            );
+
+            String? windowValidationError;
+            if (effEndMin <= effStartMin) {
+              windowValidationError = 'End time must be after start time.';
+            } else if (effEndMin - effStartMin < 30) {
+              windowValidationError =
+                  'Partial coverage must be at least 30 minutes long.';
+            } else if (effStartMin < slotStartMin || effEndMin > slotEndMin) {
+              windowValidationError =
+                  'Chosen window must stay within ${DateTimeUtils.formatTimeRange(session.startTime, session.endTime)}.';
+            }
+
+            final bool isPartialWindow =
+                windowValidationError == null &&
+                (effStartMin > slotStartMin || effEndMin < slotEndMin);
+
+            final String chosenDurationLabel = windowValidationError == null
+                ? DateTimeUtils.formatMinutesShort(effEndMin - effStartMin)
+                : DateTimeUtils.formatDurationLabel(
+                    session.startTime,
+                    session.endTime,
+                  );
+
+            final String chosenRangeText =
+                '${DateTimeUtils.formatTimeOfDay(effectiveStart)} – ${DateTimeUtils.formatTimeOfDay(effectiveEnd)}';
 
             return AlertDialog(
               shape: RoundedRectangleBorder(
@@ -171,7 +344,7 @@ class _OpenSlotsTabState extends State<OpenSlotsTab> {
                             ),
                           ),
                           child: Text(
-                            'You will conduct ${chosenCourse.code} · ${chosenCourse.name} in place of cancelled ${origCourse?.code ?? 'lecture'}${durationLabel.isNotEmpty ? ' ($durationLabel slot)' : ''}.',
+                            'You will conduct ${chosenCourse.code} · ${chosenCourse.name} in place of cancelled ${origCourse?.code ?? 'lecture'} ($chosenRangeText · $chosenDurationLabel slot).',
                             style: TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.w700,
@@ -180,6 +353,149 @@ class _OpenSlotsTabState extends State<OpenSlotsTab> {
                             ),
                           ),
                         ),
+
+                      // Partial-Duration Coverage Selector when open slot > 60 min
+                      if (showDurationSelector) ...[
+                        const SizedBox(height: 14),
+                        const Text(
+                          'Coverage Duration',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: AppTheme.inkPrimary,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            ...presets.map(
+                              (preset) => ChoiceChip(
+                                label: Text(
+                                  preset.label,
+                                  style: const TextStyle(fontSize: 11.5),
+                                ),
+                                selected: selectedWindowKey == preset.key,
+                                onSelected: (_) => setDialogState(
+                                  () => selectedWindowKey = preset.key,
+                                ),
+                              ),
+                            ),
+                            ChoiceChip(
+                              label: const Text(
+                                'Custom',
+                                style: TextStyle(fontSize: 11.5),
+                              ),
+                              selected: isCustom,
+                              onSelected: (_) => setDialogState(
+                                () => selectedWindowKey = 'custom',
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (isCustom) ...[
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: () async {
+                                    final picked = await showTimePicker(
+                                      context: ctx,
+                                      initialTime: customStart,
+                                    );
+                                    if (picked != null) {
+                                      setDialogState(
+                                        () => customStart = picked,
+                                      );
+                                    }
+                                  },
+                                  icon: const Icon(
+                                    Icons.schedule_rounded,
+                                    size: 15,
+                                  ),
+                                  label: Text(
+                                    'Start ${DateTimeUtils.formatTimeOfDay(customStart)}',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: () async {
+                                    final picked = await showTimePicker(
+                                      context: ctx,
+                                      initialTime: customEnd,
+                                    );
+                                    if (picked != null) {
+                                      setDialogState(() => customEnd = picked);
+                                    }
+                                  },
+                                  icon: const Icon(
+                                    Icons.schedule_rounded,
+                                    size: 15,
+                                  ),
+                                  label: Text(
+                                    'End ${DateTimeUtils.formatTimeOfDay(customEnd)}',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                        if (windowValidationError != null) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            windowValidationError,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: AppTheme.cancelledStyle.foreground,
+                            ),
+                          ),
+                        ] else if (isPartialWindow) ...[
+                          const SizedBox(height: 8),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFCCFBF1),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: const Color(0xFF5EEAD4),
+                              ),
+                            ),
+                            child: const Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Icon(
+                                  Icons.info_outline_rounded,
+                                  size: 15,
+                                  color: Color(0xFF0F766E),
+                                ),
+                                SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    'Only your chosen window will be booked; the remaining time stays free for rescheduling.',
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFF0F766E),
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
                     ],
                     const SizedBox(height: 12),
                     Container(
@@ -205,9 +521,9 @@ class _OpenSlotsTabState extends State<OpenSlotsTab> {
                           ),
                           const Divider(height: 12),
                           _DialogSummaryRow(
-                            label: 'Slot & Room',
+                            label: 'Full Open Slot & Room',
                             value:
-                                '${DateTimeUtils.formatSlotSummary(session.sessionDate, session.startTime, session.endTime)}${durationLabel.isNotEmpty ? ' ($durationLabel)' : ''} · ${room?.displayLabel ?? 'Room'}',
+                                '${DateTimeUtils.formatSlotSummary(session.sessionDate, session.startTime, session.endTime)} · ${room?.displayLabel ?? 'Room'}',
                           ),
                           const Divider(height: 12),
                           _DialogSummaryRow(
@@ -248,9 +564,21 @@ class _OpenSlotsTabState extends State<OpenSlotsTab> {
                   style: FilledButton.styleFrom(
                     backgroundColor: AppTheme.coveredStyle.foreground,
                   ),
-                  onPressed: selectedCourseId == null
+                  onPressed:
+                      (selectedCourseId == null ||
+                          windowValidationError != null)
                       ? null
-                      : () => Navigator.of(dialogCtx).pop(selectedCourseId),
+                      : () => Navigator.of(dialogCtx).pop(
+                          _CoverageSelectionResult(
+                            courseId: selectedCourseId!,
+                            startTime: isPartialWindow
+                                ? DateTimeUtils.toSqlTime(effectiveStart)
+                                : null,
+                            endTime: isPartialWindow
+                                ? DateTimeUtils.toSqlTime(effectiveEnd)
+                                : null,
+                          ),
+                        ),
                   child: const Text('Confirm Coverage'),
                 ),
               ],
@@ -260,20 +588,25 @@ class _OpenSlotsTabState extends State<OpenSlotsTab> {
       },
     );
 
-    if (chosenCourseId == null || !mounted) return;
+    if (result == null || !mounted) return;
 
-    final chosenCourse = service.courseById(chosenCourseId);
+    final chosenCourse = service.courseById(result.courseId);
     setState(() => _busySessionId = session.id);
     try {
       await context.read<TimetableProvider>().optInCoverage(
         session.id,
-        chosenCourseId,
+        result.courseId,
+        startTime: result.startTime,
+        endTime: result.endTime,
       );
       if (!mounted) return;
+      final partialMsg = result.startTime != null && result.endTime != null
+          ? ' (${DateTimeUtils.formatTimeRange(result.startTime!, result.endTime!)})'
+          : '';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Slot confirmed for ${chosenCourse?.code ?? 'your course'}. Enrolled students & primary faculty notified.',
+            'Slot confirmed for ${chosenCourse?.code ?? 'your course'}$partialMsg. Enrolled students & primary faculty notified.',
           ),
         ),
       );
@@ -316,7 +649,7 @@ class _OpenSlotsTabState extends State<OpenSlotsTab> {
                 const SizedBox(width: 10),
                 const Expanded(
                   child: Text(
-                    'Cancelled or pending slots for cohorts you teach appear here. Take a slot to conduct your own assigned course—enrolled students are notified automatically.',
+                    'Cancelled or pending slots for cohorts you teach appear here. Take the full slot or a partial window to conduct your own assigned course.',
                     style: TextStyle(
                       fontSize: 12.5,
                       color: AppTheme.inkPrimary,

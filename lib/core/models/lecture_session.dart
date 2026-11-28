@@ -9,6 +9,8 @@ class LectureSession {
     required this.facultyId,
     this.coveringFacultyId,
     this.coveringCourseId,
+    this.preCoverageStartTime,
+    this.preCoverageEndTime,
     required this.roomId,
     required this.sessionDate,
     required this.startTime,
@@ -33,6 +35,8 @@ class LectureSession {
   final String facultyId;
   final String? coveringFacultyId;
   final String? coveringCourseId;
+  final String? preCoverageStartTime; // HH:MM:SS
+  final String? preCoverageEndTime; // HH:MM:SS
   final String roomId;
 
   final DateTime sessionDate;
@@ -73,11 +77,28 @@ class LectureSession {
   bool get isScheduled => status == 'scheduled';
   bool get isActive => isScheduled || isRescheduled || isCovered;
   bool get isPermanent => changeScope == 'permanent';
+  bool get isPartiallyCovered =>
+      isCovered && preCoverageStartTime != null && preCoverageEndTime != null;
   bool get hasException =>
       isCancelled || isPending || isRescheduled || isCovered || isRoomChanged;
 
   String get effectiveFacultyId => coveringFacultyId ?? facultyId;
   String get activeCourseId => coveringCourseId ?? courseId;
+
+  int get durationMinutes {
+    final start = DateTimeUtils.parseSqlTime(startTime);
+    final end = DateTimeUtils.parseSqlTime(endTime);
+    return DateTimeUtils.timeOfDayToMinutes(end) -
+        DateTimeUtils.timeOfDayToMinutes(start);
+  }
+
+  /// Baseline duration in minutes (restores pre-coverage duration if partially covered).
+  int get baselineDurationMinutes {
+    final s = preCoverageStartTime ?? startTime;
+    final e = preCoverageEndTime ?? endTime;
+    return DateTimeUtils.timeOfDayToMinutes(DateTimeUtils.parseSqlTime(e)) -
+        DateTimeUtils.timeOfDayToMinutes(DateTimeUtils.parseSqlTime(s));
+  }
 
   DateTime get startUtc =>
       DateTimeUtils.campusSlotToUtc(sessionDate, startTime);
@@ -91,6 +112,8 @@ class LectureSession {
       facultyId: json['faculty_id'] as String,
       coveringFacultyId: json['covering_faculty_id'] as String?,
       coveringCourseId: json['covering_course_id'] as String?,
+      preCoverageStartTime: json['pre_coverage_start_time'] as String?,
+      preCoverageEndTime: json['pre_coverage_end_time'] as String?,
       roomId: json['room_id'] as String,
       sessionDate: DateTimeUtils.parseSqlDate(json['session_date'] as String),
       startTime: json['start_time'] as String,

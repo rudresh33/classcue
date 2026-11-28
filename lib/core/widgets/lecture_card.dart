@@ -70,6 +70,11 @@ class LectureCard extends StatelessWidget {
 
     final bool isLabSession =
         session.batch != 'ALL' || baseEntry?.sessionType == 'practical';
+    final bool showPartialCoverBadge =
+        session.isPartiallyCovered && !isCancelledForCohort;
+    final String partialCoverLabel = showPartialCoverBadge
+        ? 'Partial Cover · ${DateTimeUtils.formatDurationLabel(session.startTime, session.endTime)} of ${DateTimeUtils.formatDurationLabel(session.preCoverageStartTime!, session.preCoverageEndTime!)}'
+        : '';
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -342,6 +347,14 @@ class LectureCard extends StatelessWidget {
                       foreground: Color(0xFF6D28D9),
                       background: Color(0xFFEDE9FE),
                       border: Color(0xFFC4B5FD),
+                    ),
+                  if (showPartialCoverBadge)
+                    InfoPill(
+                      label: partialCoverLabel,
+                      icon: Icons.pie_chart_outline_rounded,
+                      foreground: const Color(0xFF0F766E),
+                      background: const Color(0xFFCCFBF1),
+                      border: const Color(0xFF5EEAD4),
                     ),
                   ...extraPills,
                 ],
